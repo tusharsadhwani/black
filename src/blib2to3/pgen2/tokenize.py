@@ -183,20 +183,20 @@ PseudoToken = Whitespace + group(PseudoExtras, Number, Funny, ContStr, Name)
 
 pseudoprog: Final = re.compile(PseudoToken, re.UNICODE)
 
-singleprog = re.compile(Single)
-singleprog_plus_lbrace = re.compile(group(SingleLbrace, Single))
-doubleprog = re.compile(Double)
-doubleprog_plus_lbrace = re.compile(group(DoubleLbrace, Double))
+singleprog = [re.compile(Single)]
+singleprog_plus_lbrace = [re.compile(SingleLbrace), re.compile(Single)]
+doubleprog = [re.compile(Double)]
+doubleprog_plus_lbrace = [re.compile(DoubleLbrace), re.compile(Double)]
 
-single3prog = re.compile(Single3)
-single3prog_plus_lbrace = re.compile(group(Single3Lbrace, Single3))
-double3prog = re.compile(Double3)
-double3prog_plus_lbrace = re.compile(group(Double3Lbrace, Double3))
+single3prog = [re.compile(Single3)]
+single3prog_plus_lbrace = [re.compile(Single3Lbrace), re.compile(Single3)]
+double3prog = [re.compile(Double3)]
+double3prog_plus_lbrace = [re.compile(Double3Lbrace), re.compile(Double3)]
 
 _strprefixes = _combinations("r", "R", "b", "B") | {"u", "U", "ur", "uR", "Ur", "UR"}
 _fstring_prefixes = _combinations("r", "R", "f", "F") - {"r", "R"}
 
-endprogs: Final = {
+endprogs_map: Final = {
     "'": singleprog,
     '"': doubleprog,
     "'''": single3prog,
@@ -590,7 +590,7 @@ def generate_tokens(
     async_def_nl = False
 
     strstart: tuple[int, int]
-    endprog_stack: list[Pattern[str]] = []
+    endprogs_stack: list[Pattern[str]] = []
     formatspec_start: tuple[int, int]
 
     while 1:  # loop over lines in stream
@@ -611,8 +611,11 @@ def generate_tokens(
             assert contline is not None
             if not line:
                 raise TokenError("EOF in multi-line string", strstart)
-            endprog = endprog_stack[-1]
-            endmatch = endprog.match(line)
+            endprogs = endprogs_stack[-1]
+            for endprog in endprogs:
+                endmatch = endprog.match(line)
+                if endmatch:
+                    break
             if endmatch:
                 end = endmatch.end(0)
                 token = contstr + line[:end]
@@ -624,7 +627,7 @@ def generate_tokens(
                     STATE_IN_BRACES,
                 ) and not is_fstring_start(token):
                     yield (STRING, token, spos, epos, tokenline)
-                    endprog_stack.pop()
+                    endprogs_stack.pop()
                     parenlev = parenlev_stack.pop()
                 else:
                     if is_fstring_start(token):
@@ -675,7 +678,7 @@ def generate_tokens(
                             line,
                         )
                         fstring_state.leave_fstring()
-                        endprog_stack.pop()
+                        endprogs_stack.pop()
                         parenlev = parenlev_stack.pop()
                 pos = end
                 contstr, needcont = "", 0
@@ -770,8 +773,11 @@ def generate_tokens(
 
         while pos < max:
             if fstring_state.current() == STATE_MIDDLE:
-                endprog = endprog_stack[-1]
-                endmatch = endprog.match(line, pos)
+                endprogs = endprogs_stack[-1]
+                for endprog in endprogs:
+                    endmatch = endprog.match(line, pos)
+                    if endmatch:
+                        break
                 if endmatch:  # all on one line
                     start, end = endmatch.span(0)
                     token = line[start:end]
@@ -801,7 +807,7 @@ def generate_tokens(
                             line,
                         )
                         fstring_state.leave_fstring()
-                        endprog_stack.pop()
+                        endprogs_stack.pop()
                         parenlev = parenlev_stack.pop()
                     else:
                         yield (LBRACE, "{", (lnum, end - 1), (lnum, end), line)
@@ -891,15 +897,18 @@ def generate_tokens(
                         stashed = None
                     yield (COMMENT, token, spos, epos, line)
                 elif token in triple_quoted:
-                    endprog = endprogs[token]
-                    endprog_stack.append(endprog)
+                    endprogs = endprogs_map[token]
+                    endprogs_stack.append(endprogs)
                     parenlev_stack.append(parenlev)
                     parenlev = 0
                     if is_fstring_start(token):
                         yield (FSTRING_START, token, spos, epos, line)
                         fstring_state.enter_fstring()
 
-                    endmatch = endprog.match(line, pos)
+                    for endprog in endprogs:
+                        endmatch = endprog.match(line, pos)
+                        if endmatch:
+                            break
                     if endmatch:  # all on one line
                         if stashed:
                             yield stashed
@@ -909,7 +918,7 @@ def generate_tokens(
                             token = line[start:pos]
                             epos = (lnum, pos)
                             yield (STRING, token, spos, epos, line)
-                            endprog_stack.pop()
+                            endprogs_stack.pop()
                             parenlev = parenlev_stack.pop()
                         else:
                             end = endmatch.end(0)
@@ -933,7 +942,7 @@ def generate_tokens(
                                     line,
                                 )
                                 fstring_state.leave_fstring()
-                                endprog_stack.pop()
+                                endprogs_stack.pop()
                                 parenlev = parenlev_stack.pop()
                             else:
                                 fstring_middle, lbrace = token[:-1], token[-1]
@@ -964,14 +973,14 @@ def generate_tokens(
                     or token[:3] in single_quoted
                 ):
                     maybe_endprog = (
-                        endprogs.get(initial)
-                        or endprogs.get(token[:2])
-                        or endprogs.get(token[:3])
+                        endprogs_map.get(initial)
+                        or endprogs_map.get(token[:2])
+                        or endprogs_map.get(token[:3])
                     )
                     assert maybe_endprog is not None, f"endprog not found for {token}"
                     endprog = maybe_endprog
                     if token[-1] == "\n":  # continued string
-                        endprog_stack.append(endprog)
+                        endprogs_stack.append(endprog)
                         parenlev_stack.append(parenlev)
                         parenlev = 0
                         strstart = (lnum, start)
@@ -1002,8 +1011,8 @@ def generate_tokens(
                             start_epos = (lnum, start + offset)
                             yield (FSTRING_START, fstring_start, spos, start_epos, line)
                             fstring_state.enter_fstring()
-                            endprog = endprogs[fstring_start]
-                            endprog_stack.append(endprog)
+                            endprogs = endprogs_map[fstring_start]
+                            endprogs_stack.append(endprogs)
                             parenlev_stack.append(parenlev)
                             parenlev = 0
 
@@ -1023,7 +1032,7 @@ def generate_tokens(
                                 end_epos = (lnum, end_offset + 1)
                                 yield (FSTRING_END, token[-1], end_spos, end_epos, line)
                                 fstring_state.leave_fstring()
-                                endprog_stack.pop()
+                                endprogs_stack.pop()
                                 parenlev = parenlev_stack.pop()
                             else:
                                 end_spos = (lnum, end_offset)
@@ -1103,7 +1112,7 @@ def generate_tokens(
     for _indent in indents[1:]:  # pop remaining indent levels
         yield (DEDENT, "", (lnum, 0), (lnum, 0), "")
     yield (ENDMARKER, "", (lnum, 0), (lnum, 0), "")
-    assert len(endprog_stack) == 0
+    assert len(endprogs_stack) == 0
     assert len(parenlev_stack) == 0
 
 
